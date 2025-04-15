@@ -14,6 +14,8 @@ from rich.prompt import Prompt
 
 console = Console()
 
+PAYSAFE_API_BASE = "https://api.test.paysafe.com/paymenthub/v1"
+
 def load_env(env_path):
     with open(env_path, 'r') as f:
         env_data = json.load(f)
@@ -55,21 +57,47 @@ def cancel_payment_if_needed_threadsafe(private_key):
         console.print("[red]Failed to cancel payment.[/red]")
         console.print(response.text)
 
+def perform_settlement(payment_id, amount, private_key, merchant_ref):
+    url = f"https://api.test.paysafe.com/paymenthub/v1/payments/{payment_id}/settlements"
+    payload = {
+        "merchantRefNum": merchant_ref,
+        "dupCheck": True,
+        "amount": amount
+    }
+    headers = auth_header(private_key)
+    headers.update({"Content-Type": "application/json", "Simulator": "INTERNAL"})
+
+    response = post_with_logging(url, headers, payload)
+    data = response
+
+    console.print(Panel.fit(f"[bold cyan]Settlement Response:[/bold cyan]\n"
+                            f"ID: {data.get('id')}\n"
+                            f"Status: {data.get('status')}\n"
+                            f"Txn Time: {data.get('txnTime')}\n"
+                            f"Amount: {data.get('amount')}\n"
+                            f"Available to Refund: {data.get('availableToRefund')}", title="Settlement"))
+
+    if data.get("status") == "PENDING" or data.get("availableToRefund", 0) < amount:
+        console.print("[yellow]Settlement is PENDING or amount mismatch — attempting to cancel payment.[/yellow]")
+        cancel_payment_if_needed_threadsafe(private_key)
+
+    return data.get("id")
+
+
+
 def attempt_refund(settlement_id, amount, merchant_ref, currency, private_key):
-    refund_url = f"https://api.test.paysafe.com/paymenthub/v1/settlements/{settlement_id}/refunds"
-    refund_payload = {
+    console.print("[bold]7. Initiating Refund...[/bold]")
+    url = f"https://api.test.paysafe.com/paymenthub/v1/settlements/{settlement_id}/refunds"
+    headers = auth_header(private_key)
+    headers.update({"Content-Type": "application/json", "Simulator": "INTERNAL"})
+    payload = {
         "merchantRefNum": merchant_ref,
         "amount": amount,
         "dupCheck": True
     }
-    console.print("[bold]6. Initiating Refund...[/bold]")
-    headers = auth_header(private_key)
-    headers.update({"Content-Type": "application/json", "Simulator": "INTERNAL"})
-    refund = post_with_logging(refund_url, headers, refund_payload)
+    refund = post_with_logging(url, headers, payload)
     refund_id = refund['id']
     console.print(f"[green]Refund Submitted. ID:[/green] {refund_id}")
-
-    # Poll for refund status
     for _ in range(10):
         status = get_with_logging(f"https://api.test.paysafe.com/paymenthub/v1/refunds/{refund_id}", auth_header(private_key))
         if status['status'] == 'COMPLETED':
@@ -95,16 +123,15 @@ def submit_payment_and_poll(handle_token, merchant_ref, amount, currency, privat
         status = get_with_logging(f"https://api.test.paysafe.com/paymenthub/v1/payments/{payment_id}", auth_header(private_key))
         if status['status'] == 'COMPLETED':
             console.print(f"[bold green]Payment Completed[/bold green] ✅")
-            if refund_flag:
-                settlement_id = status.get('settlementId')
-                if settlement_id:
-                    attempt_refund(settlement_id, amount, merchant_ref, currency, private_key)
-                else:
-                    console.print("[red]No settlementId found. Cannot perform refund.[/red]")
+            # Always perform settlement
+            settlement_id = perform_settlement(payment_id, amount, private_key, merchant_ref)
+            if refund_flag and settlement_id:
+                attempt_refund(settlement_id, amount, merchant_ref, currency, private_key)
             break
         time.sleep(2)
     else:
         console.print(f"[bold red]Payment not completed in time.[/bold red]")
+
 
 def display_payment_methods(payment_methods):
     table = Table(title="Available Payment Methods")
@@ -257,8 +284,8 @@ def run_test(env, currency, amount, refund_flag, cancel_flag, interactive_flag):
     methods = get_with_logging(f"https://api.test.paysafe.com/paymenthub/v1/paymentmethods?currencyCode={currency}", auth_header(public_key))
     display_payment_methods(methods.get("paymentMethods", []))
 
-    console.print("[bold]3. Creating Payment Handle...[/bold]")
     merchant_ref = generate_merchant_ref()
+    console.print(f"[bold]3. Creating Payment Handle... {merchant_ref}[/bold]")
     payload = {
         "merchantRefNum": merchant_ref,
         "transactionType": "PAYMENT",
