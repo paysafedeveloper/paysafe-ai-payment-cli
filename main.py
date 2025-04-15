@@ -230,8 +230,11 @@ def get_with_logging(url, headers):
             console.print(f"[dim]Traceback saved to:[/dim] {tmp.name}\n[bold yellow]To view details:[/bold yellow] [italic]cat {tmp.name}[/italic]")
         raise
 
-def run_test(env, currency, amount, refund_flag, cancel_flag):
-    if amount is None:
+def run_test(env, currency, amount, refund_flag, cancel_flag, interactive_flag):
+    if not interactive_flag and amount is None:
+        console.print("[red]Amount must be provided unless --interactive is enabled.[/red]")
+        exit(1)
+    if interactive_flag and amount is None:
         amount = prompt_amount()
 
     expected_map = load_expected_responses()
@@ -261,35 +264,41 @@ def run_test(env, currency, amount, refund_flag, cancel_flag):
         "transactionType": "PAYMENT",
         "amount": amount,
         "accountId": account_id,
-        "card": {
-            "cardNum": "4000000000002503",
-            "cardExpiry": {"month": "02", "year": "2026"},
-            "cvv": 111,
-            "holderName": "John Doe"
-        },
-        "profile": {
-            "firstName": "John",
-            "lastName": "Doe",
-            "email": "john.doe@paysafe.com"
-        },
         "paymentType": "CARD",
         "currencyCode": currency,
         "customerIp": "172.0.0.1",
-        "billingDetails": {
-            "nickName": "Home",
-            "street": "5335 Gate Pkwy",
-            "city": "Jacksonville",
-            "zip": "32256",
-            "country": "US",
-            "state": "FL"
-        },
         "returnLinks": [
             {"rel": "on_completed", "href": "https://www.example.com/completed/", "method": "GET"},
             {"rel": "on_failed", "href": "https://www.example.com/failed/", "method": "GET"},
             {"rel": "default", "href": "https://www.example.com/failed/", "method": "GET"}
         ]
     }
-    payload = enrich_payload(payload)
+    if interactive_flag:
+        payload = enrich_payload(payload)
+    else:
+        # fallback for automation (static test values)
+        payload.update({
+            "card": {
+                "cardNum": "4000000000002503",
+                "cardExpiry": {"month": "02", "year": "2026"},
+                "cvv": 111,
+                "holderName": "John Doe"
+            },
+            "profile": {
+                "firstName": "John",
+                "lastName": "Doe",
+                "email": "john.doe@paysafe.com"
+            },
+            "billingDetails": {
+                "nickName": "Home",
+                "street": "5335 Gate Pkwy",
+                "city": "Jacksonville",
+                "zip": "32256",
+                "country": "US",
+                "state": "FL"
+            }
+        })
+
     headers = auth_header(private_key)
     headers.update({"Content-Type": "application/json", "Simulator": "INTERNAL"})
     payment_handle = post_with_logging("https://api.test.paysafe.com/paymenthub/v1/paymenthandles", headers, payload)
@@ -325,9 +334,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Paysafe Card Payment Test Tool")
     parser.add_argument("--env", help="Path to Postman env JSON", required=True)
     parser.add_argument("--currency", choices=["USD", "GBP"], required=True)
-    parser.add_argument("--amount", type=int, help="Amount in minor units (optional, prompts if omitted)", required=False)
+    parser.add_argument("--amount", type=int, help="Amount in minor units (optional if interactive)", required=False)
     parser.add_argument("--refund", action="store_true", help="Trigger refund if payment completes")
     parser.add_argument("--cancel", action="store_true", help="Attempt cancellation if delayed payment")
+    parser.add_argument("--interactive", action="store_true", help="Enable interactive form input for card, address, profile, and amount")
     args = parser.parse_args()
     env = load_env(args.env)
-    run_test(env, args.currency, args.amount, args.refund, args.cancel)
+    run_test(env, args.currency, args.amount, args.refund, args.cancel, args.interactive)
