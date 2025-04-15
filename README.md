@@ -18,6 +18,8 @@
 
 ---
 
+![screenshot](./img/img.png)
+
 ## Requirements
 
 - Python 3.8+

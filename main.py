@@ -10,6 +10,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.progress import track
 from rich.panel import Panel
+from rich.prompt import Prompt
 
 console = Console()
 
@@ -72,7 +73,7 @@ def attempt_refund(settlement_id, amount, merchant_ref, currency, private_key):
     for _ in range(10):
         status = get_with_logging(f"https://api.test.paysafe.com/paymenthub/v1/refunds/{refund_id}", auth_header(private_key))
         if status['status'] == 'COMPLETED':
-            console.print(f"[bold green]Refund Completed[/bold green] 💸")
+            console.print(f"[bold green]Refund Completed[/bold green] ✅")
             return
         time.sleep(2)
     console.print("[yellow]Refund still processing or failed after retries.[/yellow]")
@@ -104,6 +105,86 @@ def submit_payment_and_poll(handle_token, merchant_ref, amount, currency, privat
         time.sleep(2)
     else:
         console.print(f"[bold red]Payment not completed in time.[/bold red]")
+
+def display_payment_methods(payment_methods):
+    table = Table(title="Available Payment Methods")
+    table.add_column("Method")
+    table.add_column("Processor")
+    table.add_column("Account")
+    table.add_column("MCC Description")
+    table.add_column("ApplePay")
+    table.add_column("GooglePay")
+    table.add_column("Wallet")
+
+    for method in payment_methods:
+        acct_cfg = method.get("accountConfiguration", {})
+        table.add_row(
+            method.get("paymentMethod", "-"),
+            method.get("processorCode", "-"),
+            method.get("accountId", "-"),
+            method.get("mccDescription", "-"),
+            str(acct_cfg.get("isApplePay", False)),
+            str(acct_cfg.get("isGooglePay", False)),
+            str(acct_cfg.get("isCustomerWalletEnabled", False))
+        )
+    console.print(table)
+
+def prompt_card_details():
+    console.print("[bold blue]Enter Card Details[/bold blue]")
+    card_number = Prompt.ask("Card Number", default="4000000000002503")
+    expiry_month = Prompt.ask("Expiry Month (MM)", default="02")
+    expiry_year = Prompt.ask("Expiry Year (YYYY)", default="2026")
+    cvv = Prompt.ask("CVV", default="111")
+    holder_name = Prompt.ask("Cardholder Name", default="John Doe")
+    return {
+        "cardNum": card_number,
+        "cardExpiry": {"month": expiry_month, "year": expiry_year},
+        "cvv": int(cvv),
+        "holderName": holder_name
+    }
+
+def prompt_billing_address():
+    console.print("[bold blue]Enter Billing Address[/bold blue]")
+    street = Prompt.ask("Street", default="5335 Gate Pkwy")
+    city = Prompt.ask("City", default="Jacksonville")
+    zip_code = Prompt.ask("ZIP", default="32256")
+    state = Prompt.ask("State", default="FL")
+    country = Prompt.ask("Country", default="US")
+    return {
+        "nickName": "Home",
+        "street": street,
+        "city": city,
+        "zip": zip_code,
+        "country": country,
+        "state": state
+    }
+
+def prompt_profile():
+    console.print("[bold blue]Enter Customer Profile[/bold blue]")
+    first_name = Prompt.ask("First Name", default="John")
+    last_name = Prompt.ask("Last Name", default="Doe")
+    email = Prompt.ask("Email", default="john.doe@paysafe.com")
+    return {
+        "firstName": first_name,
+        "lastName": last_name,
+        "email": email
+    }
+
+def prompt_amount():
+    dollars = Prompt.ask("Enter donation amount in dollars", default="5")
+    try:
+        amount_minor = int(float(dollars) * 100)
+        return amount_minor
+    except ValueError:
+        console.print("[red]Invalid input. Must be a number.")
+        exit(1)
+
+def enrich_payload(payload):
+    payload["card"] = prompt_card_details()
+    payload["billingDetails"] = prompt_billing_address()
+    payload["profile"] = prompt_profile()
+    return payload
+
 
 def post_with_logging(url, headers, payload):
     try:
@@ -150,6 +231,9 @@ def get_with_logging(url, headers):
         raise
 
 def run_test(env, currency, amount, refund_flag, cancel_flag):
+    if amount is None:
+        amount = prompt_amount()
+
     expected_map = load_expected_responses()
     expected = expected_map.get(str(amount))
     if expected:
@@ -168,17 +252,7 @@ def run_test(env, currency, amount, refund_flag, cancel_flag):
 
     console.print("[bold]2. Fetching Payment Methods...[/bold]")
     methods = get_with_logging(f"https://api.test.paysafe.com/paymenthub/v1/paymentmethods?currencyCode={currency}", auth_header(public_key))
-    table = Table(title="Available Payment Methods")
-    table.add_column("Method")
-    table.add_column("Usage")
-    table.add_column("Category")
-    for method in methods.get('paymentMethods', []):
-        table.add_row(
-            method.get('paymentMethod', 'N/A'),
-            method.get('usage', 'N/A'),
-            method.get('paymentTypeCategory', 'N/A')
-        )
-    console.print(table)
+    display_payment_methods(methods.get("paymentMethods", []))
 
     console.print("[bold]3. Creating Payment Handle...[/bold]")
     merchant_ref = generate_merchant_ref()
@@ -215,6 +289,7 @@ def run_test(env, currency, amount, refund_flag, cancel_flag):
             {"rel": "default", "href": "https://www.example.com/failed/", "method": "GET"}
         ]
     }
+    payload = enrich_payload(payload)
     headers = auth_header(private_key)
     headers.update({"Content-Type": "application/json", "Simulator": "INTERNAL"})
     payment_handle = post_with_logging("https://api.test.paysafe.com/paymenthub/v1/paymenthandles", headers, payload)
@@ -250,7 +325,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Paysafe Card Payment Test Tool")
     parser.add_argument("--env", help="Path to Postman env JSON", required=True)
     parser.add_argument("--currency", choices=["USD", "GBP"], required=True)
-    parser.add_argument("--amount", type=int, help="Amount in minor units", required=True)
+    parser.add_argument("--amount", type=int, help="Amount in minor units (optional, prompts if omitted)", required=False)
     parser.add_argument("--refund", action="store_true", help="Trigger refund if payment completes")
     parser.add_argument("--cancel", action="store_true", help="Attempt cancellation if delayed payment")
     args = parser.parse_args()
