@@ -1,0 +1,22 @@
+[
+  { "amount": 1, "http_status": 200, "error_code": null, "response": "Approved" },
+  { "amount": 4, "http_status": 402, "error_code": 3015, "response": "The bank has requested that you process the transaction manually by calling the card holder's credit card company." },
+  { "amount": 5, "http_status": 402, "error_code": 3009, "response": "Your request has been declined by the issuing bank." },
+  { "amount": 6, "http_status": 500, "error_code": 1007, "response": "Clearing house timeout (although the simulator returns immediately; if delay is desired, see amount 96)." },
+  { "amount": 11, "http_status": 402, "error_code": 3022, "response": "The card has been declined due to insufficient funds." },
+  { "amount": 12, "http_status": 402, "error_code": 3023, "response": "Your request has been declined by the issuing bank due to its proprietary card activity regulations." },
+  { "amount": 13, "http_status": 402, "error_code": 3024, "response": "Your request has been declined because the issuing bank does not permit the transaction for this card." },
+  { "amount": 20, "http_status": 500, "error_code": 1007, "response": "An internal error occurred." },
+  { "amount": 23, "http_status": 402, "error_code": 4002, "response": "The transaction was declined by our Risk Management department." },
+  { "amount": 24, "http_status": 402, "error_code": 3007, "response": "Your request has failed the AVS check." },
+  { "amount": 25, "http_status": 402, "error_code": 4001, "response": "The card number or email address associated with this transaction is in our negative database." },
+  { "amount": 77, "http_status": 402, "error_code": 3060, "response": "Your request has been declined because Strong Customer Authentication is required." },
+  { "amount": 90, "http_status": 200, "error_code": null, "response": "Approved with 5-second delay" },
+  { "amount": 91, "http_status": 200, "error_code": null, "response": "Approved with 10-second delay" },
+  { "amount": 92, "http_status": 200, "error_code": null, "response": "Approved with 15-second delay" },
+  { "amount": 93, "http_status": 200, "error_code": null, "response": "Approved with 20-second delay" },
+  { "amount": 94, "http_status": 200, "error_code": null, "response": "Approved with 25-second delay" },
+  { "amount": 95, "http_status": 200, "error_code": null, "response": "Approved with 30-second delay" },
+  { "amount": 96, "http_status": 500, "error_code": 1007, "response": "Declined with 35-second delay. Transaction timed out after 30 seconds." },
+  { "amount": 100, "http_status": 200, "error_code": null, "response": "Approved" }
+]
