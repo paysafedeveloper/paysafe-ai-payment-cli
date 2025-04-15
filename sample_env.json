@@ -1,0 +1,8 @@
+{
+  "values": [
+    { "key": "public_key", "value": "your_public_key", "enabled": true },
+    { "key": "private_key", "value": "your_private_key", "enabled": true },
+    { "key": "account_id_cards_usd", "value": "your_account_id_usd", "enabled": true },
+    { "key": "account_id_cards_gbp", "value": "your_account_id_gbp", "enabled": true }
+  ]
+}
