@@ -3,7 +3,7 @@ import json
 import time
 import uuid
 import requests
-import base64
+import threading
 import tempfile
 import traceback
 from rich.console import Console
@@ -13,40 +13,22 @@ from rich.panel import Panel
 
 console = Console()
 
-# Simulated response expectation mapping
-SIMULATED_RESPONSES = {
-    1:  "Approved",
-    4:  "The bank has requested that you process the transaction manually by calling the card holder's credit card company.",
-    5:  "Your request has been declined by the issuing bank.",
-    6:  "Clearing house timeout (although the simulator returns immediately; if delay is desired, see amount 96).",
-    11: "The card has been declined due to insufficient funds.",
-    12: "Your request has been declined by the issuing bank due to its proprietary card activity regulations.",
-    13: "Your request has been declined because the issuing bank does not permit the transaction for this card.",
-    20: "An internal error occurred.",
-    23: "The transaction was declined by our Risk Management department.",
-    24: "Your request has failed the AVS check.",
-    25: "The card number or email address associated with this transaction is in our negative database.",
-    77: "Your request has been declined because Strong Customer Authentication is required.",
-    90: "Approved with 5-second delay",
-    91: "Approved with 10-second delay",
-    92: "Approved with 15-second delay",
-    93: "Approved with 20-second delay",
-    94: "Approved with 25-second delay",
-    95: "Approved with 30-second delay",
-    96: "Declined with 35-second delay. Transaction timed out after 30 seconds.",
-    100: "Approved"
-}
-
-
 def load_env(env_path):
     with open(env_path, 'r') as f:
         env_data = json.load(f)
         return {item['key']: item['value'] for item in env_data['values'] if item['enabled']}
 
+def load_expected_responses():
+    try:
+        with open("expect_response.json", 'r') as f:
+            data = json.load(f)
+            return {str(item["error_code"]): item["response"] for item in data if "error_code" in item and "response" in item}
+    except FileNotFoundError:
+        console.print("[red]expect_response.json not found. Skipping expected code check.[/red]")
+        return {}
 
 def generate_merchant_ref():
     return str(uuid.uuid4())
-
 
 def auth_header(key):
     return {
@@ -54,6 +36,74 @@ def auth_header(key):
         "Accept": "application/json"
     }
 
+payment_status_shared = {"payment_id": None}
+
+def cancel_payment_if_needed_threadsafe(private_key):
+    while payment_status_shared["payment_id"] is None:
+        time.sleep(0.2)
+    payment_id = payment_status_shared["payment_id"]
+    cancel_url = f"https://api.test.paysafe.com/paymenthub/v1/payments/{payment_id}"
+    headers = auth_header(private_key)
+    headers.update({"Content-Type": "application/json", "Simulator": "INTERNAL"})
+    payload = {"status": "CANCELLED"}
+    response = requests.put(cancel_url, headers=headers, json=payload)
+    if response.ok:
+        data = response.json()
+        console.print(f"[blue]Cancellation response:[/blue] {data['status']}")
+    else:
+        console.print("[red]Failed to cancel payment.[/red]")
+        console.print(response.text)
+
+def attempt_refund(settlement_id, amount, merchant_ref, currency, private_key):
+    refund_url = f"https://api.test.paysafe.com/paymenthub/v1/settlements/{settlement_id}/refunds"
+    refund_payload = {
+        "merchantRefNum": merchant_ref,
+        "amount": amount,
+        "dupCheck": True
+    }
+    console.print("[bold]6. Initiating Refund...[/bold]")
+    headers = auth_header(private_key)
+    headers.update({"Content-Type": "application/json", "Simulator": "INTERNAL"})
+    refund = post_with_logging(refund_url, headers, refund_payload)
+    refund_id = refund['id']
+    console.print(f"[green]Refund Submitted. ID:[/green] {refund_id}")
+
+    # Poll for refund status
+    for _ in range(10):
+        status = get_with_logging(f"https://api.test.paysafe.com/paymenthub/v1/refunds/{refund_id}", auth_header(private_key))
+        if status['status'] == 'COMPLETED':
+            console.print(f"[bold green]Refund Completed[/bold green] 💸")
+            return
+        time.sleep(2)
+    console.print("[yellow]Refund still processing or failed after retries.[/yellow]")
+
+def submit_payment_and_poll(handle_token, merchant_ref, amount, currency, private_key, refund_flag):
+    payment_payload = {
+        "merchantRefNum": merchant_ref,
+        "amount": amount,
+        "currencyCode": currency,
+        "paymentHandleToken": handle_token
+    }
+    payment = post_with_logging("https://api.test.paysafe.com/paymenthub/v1/payments", auth_header(private_key), payment_payload)
+    payment_id = payment['id']
+    payment_status_shared["payment_id"] = payment_id
+    console.print(f"[green]Payment Submitted. ID:[/green] {payment_id}")
+
+    console.print("[bold]5. Polling for Payment Completion...[/bold]")
+    for _ in track(range(10), description="Checking payment status..."):
+        status = get_with_logging(f"https://api.test.paysafe.com/paymenthub/v1/payments/{payment_id}", auth_header(private_key))
+        if status['status'] == 'COMPLETED':
+            console.print(f"[bold green]Payment Completed[/bold green] ✅")
+            if refund_flag:
+                settlement_id = status.get('settlementId')
+                if settlement_id:
+                    attempt_refund(settlement_id, amount, merchant_ref, currency, private_key)
+                else:
+                    console.print("[red]No settlementId found. Cannot perform refund.[/red]")
+            break
+        time.sleep(2)
+    else:
+        console.print(f"[bold red]Payment not completed in time.[/bold red]")
 
 def post_with_logging(url, headers, payload):
     try:
@@ -63,11 +113,19 @@ def post_with_logging(url, headers, payload):
     except requests.exceptions.HTTPError:
         try:
             err_json = response.json()
-            code = err_json.get("error", {}).get("code", "N/A")
+            code = str(err_json.get("error", {}).get("code", "N/A"))
             message = err_json.get("error", {}).get("message", "")
             additional = err_json.get("error", {}).get("additionalDetails", [])
             details = "\n".join([f"[bold cyan]{d.get('type')}[/bold cyan] ({d.get('code')}): {d.get('message')}" for d in additional])
             summary = f"[red]Error Code:[/red] {code}\n[red]Message:[/red] {message}\n{details}"
+
+            expected_map = load_expected_responses()
+            expected_info = expected_map.get(code)
+            if expected_info:
+                console.print(Panel.fit(f"Expected: [green]{expected_info}[/green]\nActual: [cyan]{message}[/cyan]", title="[blue]Error Code Validation[/blue]"))
+            else:
+                console.print(f"[yellow]No expectation found for error code {code}[/yellow]")
+
             if any(d.get("code") == "ADVICE-06" for d in additional):
                 console.print(Panel.fit(summary, title="[yellow]Important Advisory[/yellow]", subtitle="This appears to be a step-up or bank referral situation."))
             else:
@@ -78,7 +136,6 @@ def post_with_logging(url, headers, payload):
                 console.print(Panel.fit("Workflow failed at payment step. See trace log for details.", title="[red]Fatal Error[/red]"))
                 console.print(f"[dim]Traceback saved to:[/dim] {tmp.name}\n[bold yellow]To view details:[/bold yellow] [italic]cat {tmp.name}[/italic]")
         raise
-
 
 def get_with_logging(url, headers):
     try:
@@ -92,11 +149,11 @@ def get_with_logging(url, headers):
             console.print(f"[dim]Traceback saved to:[/dim] {tmp.name}\n[bold yellow]To view details:[/bold yellow] [italic]cat {tmp.name}[/italic]")
         raise
 
-
-def run_test(env, currency, amount):
-    expected = SIMULATED_RESPONSES.get(amount)
+def run_test(env, currency, amount, refund_flag, cancel_flag):
+    expected_map = load_expected_responses()
+    expected = expected_map.get(str(amount))
     if expected:
-        console.print(Panel.fit(f"Simulated Amount: [bold cyan]{amount}[/bold cyan]\nExpecting: [italic green]{expected}[/italic green]", title="[blue]Simulation Info[/blue]"))
+        console.print(Panel.fit(f"Simulated Amount: [bold cyan]{amount}[/bold cyan]\nExpecting Code: [italic green]{expected}[/italic green]", title="[blue]Simulation Info[/blue]"))
     else:
         console.print(f"[yellow]Note:[/yellow] No known simulator behavior defined for amount = {amount}")
 
@@ -168,32 +225,34 @@ def run_test(env, currency, amount):
     console.print(Panel.fit(f"About to charge [bold yellow]{amount}[/bold yellow] {currency} using card [cyan]{card_info}[/cyan]", title="[bold blue]Payment Summary[/bold blue]"))
 
     console.print("[bold]4. Submitting Payment...[/bold]")
-    payment_payload = {
-        "merchantRefNum": merchant_ref,
-        "amount": amount,
-        "currencyCode": currency,
-        "paymentHandleToken": handle_token
-    }
-    payment = post_with_logging("https://api.test.paysafe.com/paymenthub/v1/payments", auth_header(private_key), payment_payload)
-    payment_id = payment['id']
-    console.print(f"[green]Payment Submitted. ID:[/green] {payment_id}")
+    threads = []
+    pay_thread = threading.Thread(
+        target=submit_payment_and_poll,
+        args=(handle_token, merchant_ref, amount, currency, private_key, refund_flag),
+        daemon=True
+    )
+    threads.append(pay_thread)
+    pay_thread.start()
 
-    console.print("[bold]5. Polling for Payment Completion...[/bold]")
-    for _ in track(range(10), description="Checking payment status..."):
-        status = get_with_logging(f"https://api.test.paysafe.com/paymenthub/v1/payments/{payment_id}", auth_header(private_key))
-        if status['status'] == 'COMPLETED':
-            console.print(f"[bold green]Payment Completed[/bold green] ✅")
-            break
-        time.sleep(2)
-    else:
-        console.print(f"[bold red]Payment not completed in time.[/bold red]")
+    if cancel_flag and 90 <= amount < 100:
+        cancel_thread = threading.Thread(
+            target=cancel_payment_if_needed_threadsafe,
+            args=(private_key,),
+            daemon=True
+        )
+        threads.append(cancel_thread)
+        cancel_thread.start()
 
+    for t in threads:
+        t.join()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Paysafe Card Payment Test Tool")
     parser.add_argument("--env", help="Path to Postman env JSON", required=True)
     parser.add_argument("--currency", choices=["USD", "GBP"], required=True)
     parser.add_argument("--amount", type=int, help="Amount in minor units", required=True)
+    parser.add_argument("--refund", action="store_true", help="Trigger refund if payment completes")
+    parser.add_argument("--cancel", action="store_true", help="Attempt cancellation if delayed payment")
     args = parser.parse_args()
     env = load_env(args.env)
-    run_test(env, args.currency, args.amount)
+    run_test(env, args.currency, args.amount, args.refund, args.cancel)
